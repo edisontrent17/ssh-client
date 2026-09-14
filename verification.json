@@ -1,0 +1,7 @@
+{
+  "binary_bytes": 11540112,
+  "window_visible_ms_single_run": 218,
+  "rss_after_one_second": "VmRSS:\t  124696 kB",
+  "idle_cpu_seconds_over_two_seconds": 0.0,
+  "environment": "Linux x86_64, Xvfb, Mesa software OpenGL; no active SSH sessions; executable excludes system libraries. Not a hardware desktop benchmark."
+}

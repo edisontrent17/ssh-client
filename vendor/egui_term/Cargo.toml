@@ -1,0 +1,12 @@
+[package]
+name = "egui_term"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/kemokempo/egui_term"
+
+[dependencies]
+egui = "0.35"
+alacritty_terminal = "0.26"
+anyhow = "1"
+open = "5"
