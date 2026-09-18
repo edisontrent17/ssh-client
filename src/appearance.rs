@@ -1,4 +1,6 @@
-use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Stroke};
+#[cfg(target_os = "macos")]
+use eframe::egui::FontFamily;
+use eframe::egui::{self, Color32, FontId, RichText, Stroke};
 use egui_term::{ColorPalette, TerminalTheme};
 
 pub const TEXT: Color32 = Color32::from_rgb(29, 29, 31);
