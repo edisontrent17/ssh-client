@@ -12,7 +12,9 @@ cargo clippy --locked --all-targets --features ghostty,terminal-fixture -- -D wa
 python3 scripts/package_macos.py
 ```
 
-For the first Ghostty build, run `python3 scripts/build_ghostty.py` before the feature-enabled tests. The packaging script also builds the pinned Ghostty library, builds Relay with a macOS 13 deployment target, copies runtime resources and third-party notices, bundles non-system libraries, rewrites library paths, and ad-hoc signs the bundle. It verifies the signature and runs `--check-installation` after moving the app into a different directory containing spaces. It emits `target/dist/Relay-VERSION-macos-arm64.zip` and `SHA256SUMS`.
+For the first Ghostty build, run `python3 scripts/build_ghostty.py` before the feature-enabled tests. The packaging script also builds the pinned Ghostty library, builds Relay with a macOS 13 deployment target and `macos-distribution` feature (statically compiled OpenSSL), copies runtime resources and third-party notices, and ad-hoc signs the bundle. It checks the minimum OS version of the executable and every bundled non-system library; copying libraries from a newer Homebrew installation must not silently raise the minimum OS requirement. It verifies the signature and runs `--check-installation` after moving the app into a different directory containing spaces. It emits `target/dist/Relay-VERSION-macos-arm64.zip` and `SHA256SUMS`.
+
+Use 0.1.1 or later. The initial 0.1.0 archive bundled Homebrew OpenSSL libraries requiring macOS 26; it was superseded by the source-built OpenSSL release. Its original artifact and tag remain unchanged for traceability.
 
 Use a clean checkout for releases. The package's version comes from `Cargo.toml`; update its lockfile entry together. Run the native smoke fixture on a macOS desktop:
 

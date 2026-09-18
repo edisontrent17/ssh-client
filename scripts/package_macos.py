@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -22,6 +23,14 @@ def run(*args, **kwargs):
 def dependencies(binary):
     output = subprocess.check_output(["otool", "-L", str(binary)], text=True)
     return [line.strip().split(" (compatibility", 1)[0] for line in output.splitlines()[1:]]
+
+
+def check_deployment_target(binary):
+    output = subprocess.check_output(["otool", "-l", str(binary)], text=True)
+    versions = re.findall(r"cmd LC_BUILD_VERSION\s+cmdsize \d+\s+platform \d+\s+minos ([\d.]+)", output)
+    versions += re.findall(r"cmd LC_VERSION_MIN_MACOSX\s+cmdsize \d+\s+version ([\d.]+)", output)
+    if not versions or any(tuple(map(int, version.split('.')[:2])) > (13, 0) for version in versions):
+        raise RuntimeError(f"{binary.name} does not support the advertised macOS 13 minimum: {versions}")
 
 
 def bundle_libraries(executable, frameworks):
@@ -49,6 +58,7 @@ def bundle_libraries(executable, frameworks):
     for library in frameworks.iterdir():
         run("codesign", "--force", "--sign", "-", str(library))
     for binary in [executable, *frameworks.iterdir()]:
+        check_deployment_target(binary)
         forbidden = [p for p in dependencies(binary) if not p.startswith(("/System/", "/usr/lib/", "@"))]
         if forbidden:
             raise RuntimeError(f"External dependencies remain: {forbidden}")
@@ -59,7 +69,7 @@ def notices(destination):
     destination.mkdir()
     metadata = json.loads(subprocess.check_output([
         "cargo", "metadata", "--locked", "--offline", "--format-version", "1",
-        "--features", "ghostty", "--filter-platform", "aarch64-apple-darwin",
+        "--features", "macos-distribution", "--filter-platform", "aarch64-apple-darwin",
     ], cwd=ROOT, text=True))
     sources = [(f"rust-{p['name']}-{p['version']}", Path(p["manifest_path"]).parent)
                for p in metadata["packages"] if p["name"] != "ssh-client"]
@@ -68,8 +78,8 @@ def notices(destination):
                 ("ghostty-fonts", ghostty / "src/font/res"),
                 ("lucide-icons", ROOT / "src/assets/icons")]
     sources += [(f"ghostty-dependency-{p.name}", p) for p in (ROOT / "target/ghostty/zig-cache/p").iterdir() if p.is_dir()]
-    openssl = Path(subprocess.check_output(["brew", "--prefix", "openssl@3"], text=True).strip())
-    sources.append(("openssl", openssl))
+    sources += [("openssl", Path(p["manifest_path"]).parent / "openssl")
+                for p in metadata["packages"] if p["name"] == "openssl-src"]
     for name, folder in sources:
         matches = []
         for subdir in [folder, folder / "docs", folder / "licenses"]:
@@ -95,7 +105,7 @@ def main():
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
     if not args.skip_build:
         run("python3", "scripts/build_ghostty.py", cwd=ROOT)
-        run("cargo", "build", "--release", "--locked", "--features", "ghostty", "--bin", "ssh-client",
+        run("cargo", "build", "--release", "--locked", "--features", "macos-distribution", "--bin", "ssh-client",
             cwd=ROOT, env=dict(os.environ, MACOSX_DEPLOYMENT_TARGET="13.0"))
     output = ROOT / "target/dist"
     output.mkdir(exist_ok=True)

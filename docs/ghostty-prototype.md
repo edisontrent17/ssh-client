@@ -51,7 +51,7 @@ The build script downloads and checksum-verifies Zig 0.15.2, clones the exact Gh
 
 The library targets macOS 13+. It was built and exercised on Apple Silicon / macOS 26.6.2; Intel and other macOS versions have not been validated. Full Xcode is not installed on the test machine. Runtime shader compilation contributes startup work; a packaged implementation should investigate precompiled Metal libraries.
 
-Source builds find resources in this checkout's `target/ghostty/source/zig-out/share/ghostty`. Packaged builds find them beside the executable inside `Relay.app/Contents/Resources`, and include OpenSSL in `Contents/Frameworks`. The packaged app selects Ghostty by default; `--standard-terminal` selects the fallback. See [release packaging](releasing.md). Apple Developer ID signing/notarization, accessibility, complete IME/key-layout coverage, drag-and-drop into terminals, and all standalone Ghostty actions remain outside this release.
+Source builds find resources in this checkout's `target/ghostty/source/zig-out/share/ghostty`. Packaged builds find them beside the executable inside `Relay.app/Contents/Resources`, and statically link OpenSSL built for the release's minimum macOS version. The packaged app selects Ghostty by default; `--standard-terminal` selects the fallback. See [release packaging](releasing.md). Apple Developer ID signing/notarization, accessibility, complete IME/key-layout coverage, drag-and-drop into terminals, and all standalone Ghostty actions remain outside this release.
 
 ## Validation
 

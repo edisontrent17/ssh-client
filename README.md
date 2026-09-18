@@ -14,7 +14,7 @@ open -a Relay
 
 The app includes the Ghostty terminal, runtime resources, and OpenSSL. Rust and Zig are not required to install it. You can also download the app from [GitHub Releases](https://github.com/edisontrent17/ssh-client/releases). No SSH connection opens automatically.
 
-Version 0.1.0 is an early, **unnotarized** release. If macOS blocks the first launch, use **System Settings → Privacy & Security → Open Anyway** after attempting to open Relay. Updates use `brew upgrade --cask edisontrent17/tap/relay-ssh`. Intel Macs, Windows, and Linux do not have prebuilt packages in this release.
+This is an early, **unnotarized** release. If macOS blocks the first launch, use **System Settings → Privacy & Security → Open Anyway** after attempting to open Relay. Updates use `brew upgrade --cask edisontrent17/tap/relay-ssh`. Intel Macs, Windows, and Linux do not have prebuilt packages in this release.
 
 The packaged app defaults to Ghostty. To try the standard terminal, launch `/Applications/Relay.app/Contents/MacOS/relay --standard-terminal`. [Packaging and release instructions](docs/releasing.md).
 

@@ -1,6 +1,6 @@
 [package]
 name = "ssh-client"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.92"
 description = "A small native SSH desktop client"
@@ -35,6 +35,7 @@ debug = 0
 [features]
 terminal-fixture = ["egui_term/test-support"]
 ghostty = ["dep:raw-window-handle", "dep:cc"]
+macos-distribution = ["ghostty", "ssh2/vendored-openssl"]
 
 [[example]]
 name = "terminal_bench"
