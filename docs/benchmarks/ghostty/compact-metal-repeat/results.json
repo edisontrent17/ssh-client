@@ -1,0 +1,48 @@
+{
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "binary_sha256": "592740b653556cd29b322435802484e7f1416ec6db69e53b4bddc68ae513b986",
+  "settle_seconds": 15,
+  "viewport": [
+    1280,
+    800
+  ],
+  "visit_all_tabs": true,
+  "measurements": [
+    {
+      "engine": "ghostty",
+      "tabs": 5,
+      "output_lines": 2100,
+      "stage": "open",
+      "elapsed_seconds": 16.3,
+      "startup_seconds": 0.21,
+      "all_tabs_visited": true,
+      "font_atlas": [
+        16384,
+        32
+      ],
+      "live_rust_bytes": 11592102,
+      "peak_rust_bytes": 13892292,
+      "texture_bytes": 2216960,
+      "footprint_mib": 346.7,
+      "peak_mib": 372.2
+    },
+    {
+      "engine": "ghostty",
+      "tabs": 5,
+      "output_lines": 2100,
+      "stage": "closed",
+      "elapsed_seconds": 34.1,
+      "startup_seconds": 0.21,
+      "all_tabs_visited": true,
+      "font_atlas": [
+        16384,
+        32
+      ],
+      "live_rust_bytes": 11614046,
+      "peak_rust_bytes": 13892292,
+      "texture_bytes": 2216960,
+      "footprint_mib": 303.5,
+      "peak_mib": 372.2
+    }
+  ]
+}

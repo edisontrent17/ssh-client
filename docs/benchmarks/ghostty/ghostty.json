@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "binary_sha256": "bd3ddb164fade274338a489ae93afa7206430e7832e156f2f97ab314a3792e47",
+  "fixture_viewport": [
+    1280,
+    800
+  ],
+  "settle_seconds": 15,
+  "interval_seconds": 2,
+  "samples_per_state": 3,
+  "measurements": [
+    {
+      "state": "empty",
+      "sample": 0,
+      "footprint_bytes": 58929971,
+      "peak_footprint_bytes": 304716186
+    },
+    {
+      "state": "empty",
+      "sample": 1,
+      "footprint_bytes": 58405683,
+      "peak_footprint_bytes": 304716186
+    },
+    {
+      "state": "empty",
+      "sample": 2,
+      "footprint_bytes": 58405683,
+      "peak_footprint_bytes": 304716186
+    },
+    {
+      "state": "workspace",
+      "sample": 0,
+      "footprint_bytes": 574619648,
+      "peak_footprint_bytes": 1503238554
+    },
+    {
+      "state": "workspace",
+      "sample": 1,
+      "footprint_bytes": 574619648,
+      "peak_footprint_bytes": 1503238554
+    },
+    {
+      "state": "workspace",
+      "sample": 2,
+      "footprint_bytes": 574724506,
+      "peak_footprint_bytes": 1503238554
+    },
+    {
+      "state": "terminals",
+      "sample": 0,
+      "footprint_bytes": 554486989,
+      "peak_footprint_bytes": 982830285
+    },
+    {
+      "state": "terminals",
+      "sample": 1,
+      "footprint_bytes": 556374426,
+      "peak_footprint_bytes": 982830285
+    },
+    {
+      "state": "terminals",
+      "sample": 2,
+      "footprint_bytes": 556479283,
+      "peak_footprint_bytes": 982830285
+    }
+  ]
+}

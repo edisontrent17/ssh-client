@@ -19,6 +19,7 @@ use crate::bindings::{BindingAction, BindingsLayout, InputKind};
 use crate::font::TerminalFont;
 use crate::theme::TerminalTheme;
 use crate::types::Size;
+use std::{collections::HashMap, sync::Arc};
 
 const EGUI_TERM_WIDGET_ID_PREFIX: &str = "egui_term::instance::";
 
@@ -34,6 +35,57 @@ pub struct TerminalViewState {
     is_dragged: bool,
     scroll_pixels: f32,
     current_mouse_position_on_grid: TerminalGridPoint,
+}
+
+/// Owned by the backend so closing a tab releases its retained paint data.
+#[derive(Default)]
+pub(crate) struct RenderCache {
+    paint_key: Option<PaintKey>,
+    shapes: Vec<Shape>,
+    glyphs: GlyphCache,
+    #[cfg(test)]
+    builds: usize,
+}
+
+#[derive(Default)]
+struct GlyphCache {
+    font: Option<(egui::FontId, f32)>,
+    galleys: HashMap<char, Arc<egui::Galley>>,
+}
+
+impl GlyphCache {
+    fn prepare(&mut self, font: egui::FontId, pixels_per_point: f32) {
+        if self.font.as_ref() != Some(&(font.clone(), pixels_per_point)) {
+            self.galleys.clear();
+            self.font = Some((font, pixels_per_point));
+        }
+    }
+
+    fn layout(&mut self, character: char, painter: &Painter) -> Arc<egui::Galley> {
+        if let Some(galley) = self.galleys.get(&character) {
+            return galley.clone();
+        }
+        // Limit retained glyphs even when remote output contains many unique characters.
+        if self.galleys.len() >= 2048 {
+            self.galleys.clear();
+        }
+        let font = self.font.as_ref().expect("prepared glyph cache").0.clone();
+        let galley = painter.fonts_mut(|fonts| {
+            fonts.layout_no_wrap(character.to_string(), font, egui::Color32::PLACEHOLDER)
+        });
+        self.galleys.insert(character, galley.clone());
+        galley
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct PaintKey {
+    revision: u64,
+    rect: Rect,
+    pixels_per_point: f32,
+    font: egui::FontId,
+    theme: TerminalTheme,
+    mouse: TerminalGridPoint,
 }
 
 pub struct TerminalView<'a> {
@@ -114,7 +166,7 @@ impl<'a> TerminalView<'a> {
     }
 
     fn focus(self, layout: &Response) -> Self {
-        if self.has_focus || layout.clicked() {
+        if layout.enabled() && (self.has_focus || layout.clicked()) {
             layout.request_focus();
         }
 
@@ -131,7 +183,7 @@ impl<'a> TerminalView<'a> {
     }
 
     fn process_input(self, layout: &Response, state: &mut TerminalViewState) -> Self {
-        if !layout.has_focus() {
+        if !layout.enabled() || !layout.has_focus() {
             return self;
         }
 
@@ -160,9 +212,23 @@ impl<'a> TerminalView<'a> {
                     &self.bindings_layout,
                     modifiers,
                 )),
-                egui::Event::MouseWheel { unit, delta, .. } => input_actions.push(
-                    process_mouse_wheel(state, self.font.font_type().size, unit, delta),
-                ),
+                egui::Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers,
+                    ..
+                } => {
+                    if let Some(position) = layout.ctx.pointer_hover_pos() {
+                        input_actions.push(process_mouse_wheel(
+                            state,
+                            self.font.font_type().size,
+                            unit,
+                            delta,
+                            modifiers,
+                            position - layout.rect.min,
+                        ));
+                    }
+                }
                 egui::Event::PointerButton {
                     button,
                     pressed,
@@ -202,20 +268,39 @@ impl<'a> TerminalView<'a> {
     }
 
     fn show(self, state: &mut TerminalViewState, layout: &Response, painter: &Painter) {
-        let content = self.backend.sync();
+        let (content, cache) = self.backend.render_data();
+        let key = PaintKey {
+            revision: content.revision,
+            rect: layout.rect,
+            pixels_per_point: layout.ctx.pixels_per_point(),
+            font: self.font.font_type(),
+            theme: self.theme.clone(),
+            mouse: state.current_mouse_position_on_grid,
+        };
+        if cache.paint_key.as_ref() == Some(&key) {
+            painter.extend(cache.shapes.iter().cloned());
+            return;
+        }
+        cache.glyphs.prepare(key.font.clone(), key.pixels_per_point);
+        #[cfg(test)]
+        {
+            cache.builds += 1;
+        }
         let layout_min = layout.rect.min;
         let layout_max = layout.rect.max;
         let cell_height = content.terminal_size.cell_height as f32;
         let cell_width = content.terminal_size.cell_width as f32;
         let global_bg = self.theme.get_color(Color::Named(NamedColor::Background));
 
-        let mut shapes = vec![Shape::Rect(RectShape::filled(
+        let mut shapes = std::mem::take(&mut cache.shapes);
+        shapes.clear();
+        shapes.push(Shape::Rect(RectShape::filled(
             Rect::from_min_max(layout_min, layout_max),
             CornerRadius::ZERO,
             global_bg,
-        ))];
+        )));
 
-        for indexed in content.grid.display_iter() {
+        for indexed in &content.cells {
             let flags = indexed.cell.flags;
             let is_wide_char_spacer = flags.contains(cell::Flags::WIDE_CHAR_SPACER);
             if is_wide_char_spacer {
@@ -234,7 +319,7 @@ impl<'a> TerminalView<'a> {
             });
 
             let x = layout_min.x + (cell_width * indexed.point.column.0 as f32);
-            let line_num = indexed.point.line.0 + content.grid.display_offset() as i32;
+            let line_num = indexed.point.line.0 + content.display_offset as i32;
             let y = layout_min.y + (cell_height * line_num as f32);
 
             let mut fg = self.theme.get_color(indexed.fg);
@@ -278,7 +363,7 @@ impl<'a> TerminalView<'a> {
             }
 
             // Handle cursor rendering
-            if content.grid.cursor.point == indexed.point {
+            if content.cursor_point == indexed.point {
                 let cursor_color = self.theme.get_color(content.cursor.fg);
                 shapes.push(Shape::Rect(RectShape::filled(
                     Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_width, cell_height)),
@@ -289,27 +374,22 @@ impl<'a> TerminalView<'a> {
 
             // Draw text content
             if indexed.c != ' ' && indexed.c != '\t' {
-                if content.grid.cursor.point == indexed.point && is_app_cursor_mode {
+                if content.cursor_point == indexed.point && is_app_cursor_mode {
                     std::mem::swap(&mut fg, &mut bg);
                 }
 
-                shapes.push(painter.fonts_mut(|c| {
-                    Shape::text(
-                        c,
-                        Pos2 {
-                            x: x + (cell_width / 2.0),
-                            y,
-                        },
-                        Align2::CENTER_TOP,
-                        indexed.c,
-                        self.font.font_type(),
-                        fg,
-                    )
-                }));
+                let galley = cache.glyphs.layout(indexed.c, painter);
+                let rect = Align2::CENTER_TOP
+                    .anchor_size(Pos2::new(x + cell_width / 2.0, y), galley.size());
+                shapes.push(Shape::Text(egui::epaint::TextShape::new(
+                    rect.min, galley, fg,
+                )));
             }
         }
 
-        painter.extend(shapes);
+        cache.paint_key = Some(key);
+        cache.shapes = shapes;
+        painter.extend(cache.shapes.iter().cloned());
     }
 }
 
@@ -381,6 +461,247 @@ mod relay_paste_tests {
     }
 }
 
+#[cfg(test)]
+mod relay_render_tests {
+    use super::*;
+
+    #[test]
+    fn wheel_input_reaches_the_backend_only_inside_enabled_terminal() {
+        let ctx = egui::Context::default();
+        let mut backend = TerminalBackend::in_memory(1);
+        backend.feed_output(b"\x1b[?1000h\x1b[?1006h");
+        let render = |backend: &mut TerminalBackend, enabled, events| {
+            let mut rect = Rect::NOTHING;
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let view = TerminalView::new(ui, backend).set_focus(true);
+                    rect = ui.add_enabled(enabled, view).rect;
+                },
+            );
+            rect
+        };
+        for _ in 0..3 {
+            render(&mut backend, true, vec![]);
+        }
+        let rect = render(&mut backend, true, vec![]);
+        let size = backend.last_content().terminal_size;
+        let pos = rect.min + Vec2::new(size.cell_width as f32 * 4.5, size.cell_height as f32 * 6.5);
+        render(&mut backend, true, vec![egui::Event::PointerMoved(pos)]);
+        let wheel = |unit, y, modifiers| egui::Event::MouseWheel {
+            unit,
+            delta: Vec2::new(0.0, y),
+            modifiers,
+            phase: egui::TouchPhase::Move,
+        };
+        render(
+            &mut backend,
+            true,
+            vec![wheel(MouseWheelUnit::Line, 2.0, Modifiers::NONE)],
+        );
+        assert_eq!(backend.take_fixture_input(), b"\x1b[<64;5;7M\x1b[<64;5;7M");
+        render(
+            &mut backend,
+            true,
+            vec![wheel(MouseWheelUnit::Line, -1.0, Modifiers::CTRL)],
+        );
+        assert_eq!(backend.take_fixture_input(), b"\x1b[<81;5;7M");
+        // Small macOS trackpad deltas accumulate instead of disappearing.
+        let font_size = TerminalFont::default().font_type().size;
+        for _ in 0..3 {
+            render(
+                &mut backend,
+                true,
+                vec![wheel(
+                    MouseWheelUnit::Point,
+                    font_size / 4.0,
+                    Modifiers::NONE,
+                )],
+            );
+            assert!(backend.take_fixture_input().is_empty());
+        }
+        render(
+            &mut backend,
+            true,
+            vec![wheel(
+                MouseWheelUnit::Point,
+                font_size / 4.0,
+                Modifiers::NONE,
+            )],
+        );
+        assert_eq!(backend.take_fixture_input(), b"\x1b[<64;5;7M");
+        render(
+            &mut backend,
+            true,
+            vec![wheel(MouseWheelUnit::Point, -font_size, Modifiers::NONE)],
+        );
+        assert_eq!(backend.take_fixture_input(), b"\x1b[<65;5;7M");
+        render(
+            &mut backend,
+            false,
+            vec![wheel(MouseWheelUnit::Line, 1.0, Modifiers::NONE)],
+        );
+        assert!(backend.take_fixture_input().is_empty());
+        render(
+            &mut backend,
+            true,
+            vec![
+                egui::Event::PointerMoved(Pos2::new(900.0, 500.0)),
+                wheel(MouseWheelUnit::Line, 1.0, Modifiers::NONE),
+            ],
+        );
+        assert!(backend.take_fixture_input().is_empty());
+    }
+
+    #[test]
+    fn cached_glyphs_match_egui_text_meshes_and_have_a_fixed_retention_limit() {
+        let ctx = egui::Context::default();
+        let mut cache = GlyphCache::default();
+        let mut pairs = vec![];
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let font = egui::FontId::monospace(14.0);
+            cache.prepare(font.clone(), ctx.pixels_per_point());
+            for character in ['A', 'é', '日', '🦀'] {
+                for color in [egui::Color32::RED, egui::Color32::from_rgb(12, 34, 56)] {
+                    let position = Pos2::new(40.0, 20.0);
+                    let reference = ui.fonts_mut(|fonts| {
+                        Shape::text(
+                            fonts,
+                            position,
+                            Align2::CENTER_TOP,
+                            character,
+                            font.clone(),
+                            color,
+                        )
+                    });
+                    let galley = cache.layout(character, ui.painter());
+                    let rect = Align2::CENTER_TOP.anchor_size(position, galley.size());
+                    let cached = Shape::Text(egui::epaint::TextShape::new(rect.min, galley, color));
+                    pairs.push((reference, cached));
+                }
+            }
+        });
+        for (reference, cached) in pairs {
+            let tessellate = |shape| {
+                ctx.tessellate(
+                    vec![egui::epaint::ClippedShape {
+                        clip_rect: Rect::EVERYTHING,
+                        shape,
+                    }],
+                    ctx.pixels_per_point(),
+                )
+            };
+            let expected = tessellate(reference);
+            let actual = tessellate(cached);
+            assert_eq!(actual.len(), expected.len());
+            for (a, b) in actual.iter().zip(&expected) {
+                let (egui::epaint::Primitive::Mesh(a), egui::epaint::Primitive::Mesh(b)) =
+                    (&a.primitive, &b.primitive)
+                else {
+                    panic!("Expected text meshes")
+                };
+                assert_eq!(a.vertices, b.vertices);
+                assert_eq!(a.indices, b.indices);
+                assert_eq!(a.texture_id, b.texture_id);
+            }
+        }
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for codepoint in 0x400..0x400 + 2200 {
+                cache.layout(char::from_u32(codepoint).unwrap(), ui.painter());
+            }
+            assert!(cache.galleys.len() <= 2048);
+            cache.prepare(egui::FontId::monospace(20.0), ctx.pixels_per_point());
+            assert!(cache.galleys.is_empty());
+        });
+    }
+
+    #[test]
+    fn terminal_cache_invalidates_for_output_selection_layout_font_theme_and_dpi() {
+        let ctx = egui::Context::default();
+        let mut backend = TerminalBackend::in_memory(1);
+        let theme = TerminalTheme::default();
+        let render = |backend: &mut TerminalBackend, width, font, theme: TerminalTheme, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 400.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let view = TerminalView::new(ui, backend)
+                        .set_theme(theme.clone())
+                        .set_font(TerminalFont::new(crate::FontSettings {
+                            font_type: egui::FontId::monospace(font),
+                        }))
+                        .set_focus(true);
+                    ui.add(view);
+                },
+            )
+        };
+        backend.feed_output("\x1b[31mHello\x1b[0m café 日本語\r\n".as_bytes());
+        for _ in 0..3 {
+            render(&mut backend, 800.0, 14.0, theme.clone(), vec![]);
+        }
+        let builds = backend.render_data().1.builds;
+        backend.set_visible(false);
+        assert_eq!(backend.last_content().cells.capacity(), 0);
+        // render_data rebuilds the cell snapshot, but not the drawing cache.
+        let cache = backend.render_data().1;
+        assert_eq!(cache.shapes.capacity(), 0);
+        assert_eq!(cache.glyphs.galleys.capacity(), 0);
+        assert!(cache.paint_key.is_none());
+        backend.set_visible(true);
+        render(&mut backend, 800.0, 14.0, theme.clone(), vec![]);
+        assert_eq!(backend.render_data().1.builds, builds);
+        for _ in 0..10 {
+            render(&mut backend, 800.0, 14.0, theme.clone(), vec![]);
+        }
+        assert_eq!(backend.render_data().1.builds, builds);
+        backend.feed_output(b"new");
+        render(&mut backend, 800.0, 14.0, theme.clone(), vec![]);
+        assert_eq!(backend.render_data().1.builds, builds + 1);
+        backend.process_command(BackendCommand::SelectStart(SelectionType::Simple, 0.0, 0.0));
+        backend.process_command(BackendCommand::SelectUpdate(40.0, 0.0));
+        render(&mut backend, 800.0, 14.0, theme.clone(), vec![]);
+        assert_eq!(backend.render_data().1.builds, builds + 2);
+        render(&mut backend, 700.0, 14.0, theme.clone(), vec![]);
+        assert_eq!(backend.render_data().1.builds, builds + 3);
+        render(&mut backend, 700.0, 16.0, theme.clone(), vec![]);
+        assert_eq!(backend.render_data().1.builds, builds + 4);
+        let changed = TerminalTheme::new(Box::new(crate::ColorPalette {
+            foreground: "#123456".into(),
+            ..Default::default()
+        }));
+        render(&mut backend, 700.0, 16.0, changed.clone(), vec![]);
+        assert_eq!(backend.render_data().1.builds, builds + 5);
+        ctx.set_pixels_per_point(2.0);
+        render(&mut backend, 700.0, 16.0, changed.clone(), vec![]);
+        assert_eq!(backend.render_data().1.builds, builds + 6);
+        render(
+            &mut backend,
+            700.0,
+            16.0,
+            changed.clone(),
+            vec![egui::Event::Text("z".into())],
+        );
+        assert_eq!(backend.take_fixture_input(), b"z");
+        backend.feed_output(b"\x1b[?2004h");
+        render(&mut backend, 700.0, 16.0, changed.clone(), vec![]);
+        render(
+            &mut backend,
+            700.0,
+            16.0,
+            changed,
+            vec![egui::Event::Paste("a\nb".into())],
+        );
+        assert_eq!(backend.take_fixture_input(), b"\x1b[200~a\nb\x1b[201~");
+    }
+}
+
 fn process_text_event(
     text: &str,
     modifiers: Modifiers,
@@ -436,23 +757,30 @@ fn process_mouse_wheel(
     font_size: f32,
     unit: MouseWheelUnit,
     delta: Vec2,
+    modifiers: Modifiers,
+    position: Vec2,
 ) -> InputAction {
-    match unit {
+    let lines = match unit {
         MouseWheelUnit::Line => {
             let lines = delta.y.signum() * delta.y.abs().ceil();
-            InputAction::BackendCall(BackendCommand::Scroll(lines as i32))
+            lines as i32
         }
         MouseWheelUnit::Point => {
             state.scroll_pixels -= delta.y;
             let lines = (state.scroll_pixels / font_size).trunc();
             state.scroll_pixels %= font_size;
-            if lines != 0.0 {
-                InputAction::BackendCall(BackendCommand::Scroll(-lines as i32))
-            } else {
-                InputAction::Ignore
-            }
+            -lines as i32
         }
-        MouseWheelUnit::Page => InputAction::Ignore,
+        MouseWheelUnit::Page => 0,
+    };
+    if lines == 0 {
+        InputAction::Ignore
+    } else {
+        InputAction::BackendCall(BackendCommand::MouseWheel {
+            lines,
+            modifiers,
+            position,
+        })
     }
 }
 
@@ -573,7 +901,7 @@ fn process_mouse_move(
         cursor_x,
         cursor_y,
         &terminal_content.terminal_size,
-        terminal_content.grid.display_offset(),
+        terminal_content.display_offset,
     );
 
     let mut actions = vec![];

@@ -1,16 +1,21 @@
 use crate::profiles::Profile;
+use crate::{
+    diagnostics,
+    preview::{CHUNK_BYTES, Chunk},
+};
 use base64::Engine;
 use eframe::egui;
 use ssh2::{CheckResult, KnownHostFileKind, OpenFlags, OpenType, RenameFlags, Session, Sftp};
 use std::{
+    collections::{BTreeSet, VecDeque},
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::Command,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     time::{Duration, Instant},
@@ -27,12 +32,24 @@ pub struct Entry {
     pub size: u64,
 }
 pub enum Request {
+    #[cfg(test)]
+    DisconnectTransport(Sender<()>),
     Connect {
         profile: Profile,
         secret: Zeroizing<String>,
         trusted: Option<String>,
     },
     List(String),
+    Refresh {
+        root: String,
+        expanded: BTreeSet<String>,
+    },
+    Preview {
+        id: u64,
+        remote: String,
+        offset: u64,
+    },
+    ClosePreview,
     Upload {
         local: Vec<PathBuf>,
         remote: String,
@@ -44,8 +61,12 @@ pub enum Request {
 }
 pub enum Event {
     Connected(String),
+    Disconnected(String),
     Trust(String),
     Entries(String, Vec<Entry>),
+    ListFailed { path: String, error: String },
+    Refreshed(Vec<(String, Result<Vec<Entry>>)>),
+    Preview { id: u64, result: Result<Chunk> },
     Progress { name: String, done: u64, total: u64 },
     Done(String),
     Error(String),
@@ -61,25 +82,80 @@ impl Worker {
         let (events, receiver) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let stopped = cancel.clone();
-        std::thread::spawn(move || {
-            let report = |event| {
-                let _ = events.send(event);
-                ctx.request_repaint();
-            };
+        static NEXT_WORKER: AtomicU64 = AtomicU64::new(1);
+        let worker_id = NEXT_WORKER.fetch_add(1, Ordering::Relaxed);
+        std::thread::Builder::new().name(format!("sftp-worker-{worker_id}")).spawn(move || {
             let mut connection: Option<Sftp> = None;
-            while let Ok(request) = requests.recv() {
+            let mut session: Option<Session> = None;
+            let mut preview: Option<(String, ssh2::File)> = None;
+            let mut request_id = 0_u64;
+            loop {
+                let request = match requests.recv_timeout(Duration::from_secs(30)) {
+                    Ok(request) => request,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if let Some(active) = session.as_ref()
+                            && let Err(error) = active.keepalive_send() {
+                                diagnostics::record("sftp_connection_lost", serde_json::json!({"worker_id": worker_id, "cause": "keepalive", "session_code": session_error_code(&error.to_string())}));
+                                let _ = events.send(Event::Disconnected(connection_lost_message(&error.to_string())));
+                                ctx.request_repaint();
+                                discard_connection(&mut session, &mut connection, &mut preview);
+                        }
+                        continue;
+                    }
+                };
+                request_id += 1;
+                let operation = match &request {
+                    #[cfg(test)]
+                    Request::DisconnectTransport(_) => "fixture_disconnect",
+                    Request::Connect { .. } => "connect",
+                    Request::List(_) => "list",
+                    Request::Refresh { .. } => "refresh",
+                    Request::Preview { .. } => "preview",
+                    Request::ClosePreview => "close_preview",
+                    Request::Upload { .. } => "upload",
+                    Request::Download { .. } => "download",
+                };
+                let started = Instant::now();
+                let failed = std::cell::Cell::new(false);
+                let transport_failure = std::cell::RefCell::new(None::<String>);
+                diagnostics::record("sftp_request_started", serde_json::json!({"worker_id": worker_id, "request_id": request_id, "operation": operation}));
+                let report = |event: Event| {
+                    let errors: Vec<&str> = match &event {
+                        Event::Error(error) | Event::ListFailed { error, .. } | Event::Preview { result: Err(error), .. } => vec![error],
+                        Event::Refreshed(listings) => listings.iter().filter_map(|(_, result)| result.as_ref().err().map(String::as_str)).collect(),
+                        _ => vec![],
+                    };
+                    for error in errors {
+                        failed.set(true);
+                        if is_transport_failure(error) { *transport_failure.borrow_mut() = Some(error.to_owned()); }
+                        diagnostics::record("sftp_request_failed", serde_json::json!({"worker_id": worker_id, "request_id": request_id, "operation": operation, "category": error_category(error), "session_code": session_error_code(error)}));
+                    }
+                    let _ = events.send(event);
+                    ctx.request_repaint();
+                };
                 let result = match request {
+                    #[cfg(test)]
+                    Request::DisconnectTransport(ack) => {
+                        // Keep handles cached to reproduce a connection dying between reads.
+                        if let Some(session) = session.as_ref() {
+                            let _ = session.disconnect(None, "integration test", None);
+                        }
+                        let _ = ack.send(());
+                        Ok(())
+                    }
                     Request::Connect {
                         profile,
                         secret,
                         trusted,
                     } => {
-                        connection = None;
+                        discard_connection(&mut session, &mut connection, &mut preview);
                         match connect(&profile, &secret, trusted.as_deref()) {
-                            Ok(Connection::Ready(sftp)) => match sftp.realpath(Path::new(".")) {
+                            Ok(Connection::Ready(active_session, sftp)) => match sftp.realpath(Path::new(".")) {
                                 Ok(home) => {
                                     report(Event::Connected(remote_string(&home)));
                                     connection = Some(sftp);
+                                    session = Some(active_session);
                                     Ok(())
                                 }
                                 Err(e) => Err(e.to_string()),
@@ -91,12 +167,42 @@ impl Worker {
                             Err(e) => Err(e),
                         }
                     }
-                    Request::List(path) => match connection.as_ref() {
+                    Request::List(path) => {
+                        let result = connection.as_ref().ok_or_else(|| "Connect the file browser first.".into()).and_then(|sftp| list(sftp, &path));
+                        report(list_event(path, result));
+                        Ok(())
+                    }
+                    Request::Preview { id, remote, offset } => {
+                        let result = match connection.as_ref() {
+                            Some(sftp) => read_preview(sftp, &mut preview, &remote, offset),
+                            None => Err("Connect the file browser first.".into()),
+                        };
+                        if result.as_ref().is_err_and(|error| !is_transport_failure(error)) { preview = None; }
+                        report(Event::Preview { id, result });
+                        Ok(())
+                    }
+                    Request::Refresh { root, expanded } => match connection.as_ref() {
                         Some(sftp) => {
-                            list(sftp, &path).map(|entries| report(Event::Entries(path, entries)))
+                            let mut connection_error: Option<String> = None;
+                            report(Event::Refreshed(refresh_listings(
+                                root,
+                                &expanded,
+                                |path| {
+                                    if let Some(error) = &connection_error { return Err(error.clone()); }
+                                    let result = list(sftp, path);
+                                    if let Err(error) = &result
+                                        && is_transport_failure(error) { connection_error = Some(error.clone()); }
+                                    result
+                                },
+                            )));
+                            Ok(())
                         }
                         None => Err("Connect the file browser first.".into()),
                     },
+                    Request::ClosePreview => {
+                        preview = None;
+                        Ok(())
+                    }
                     Request::Upload { local, remote } => match connection.as_ref() {
                         Some(sftp) => {
                             let result = local.iter().try_for_each(|path| {
@@ -119,14 +225,163 @@ impl Worker {
                 if let Err(error) = result {
                     report(Event::Error(error));
                 }
+                if let Some(error) = transport_failure.borrow().clone()
+                    && session.is_some() {
+                        diagnostics::record("sftp_connection_lost", serde_json::json!({"worker_id": worker_id, "request_id": request_id, "cause": "request", "session_code": session_error_code(&error)}));
+                        report(Event::Disconnected(connection_lost_message(&error)));
+                        discard_connection(&mut session, &mut connection, &mut preview);
+                }
+                diagnostics::record("sftp_request_finished", serde_json::json!({"worker_id": worker_id, "request_id": request_id, "operation": operation, "success": !failed.get(), "elapsed_ms": started.elapsed().as_millis()}));
             }
-        });
+            discard_connection(&mut session, &mut connection, &mut preview);
+            diagnostics::record("sftp_worker_stopped", serde_json::json!({"worker_id": worker_id}));
+        }).expect("start SFTP worker");
         Self {
             sender,
             receiver,
             cancel,
         }
     }
+}
+
+fn connection_lost_message(error: &str) -> String {
+    format!("The file connection was lost. Reconnect files to continue.\n{error}")
+}
+
+fn discard_connection(
+    session: &mut Option<Session>,
+    connection: &mut Option<Sftp>,
+    preview: &mut Option<(String, ssh2::File)>,
+) {
+    // Closing handles on a broken socket must not add another full network timeout.
+    if let Some(session) = session.as_ref() {
+        session.set_timeout(500);
+    }
+    *preview = None;
+    *connection = None;
+    *session = None;
+}
+
+fn session_error_code(error: &str) -> Option<i32> {
+    // Paths in listing errors precede the actual library error. SFTP status errors
+    // (e.g. permission denied) do not mean the SSH transport has failed.
+    if error.contains("[SFTP(") {
+        return None;
+    }
+    error
+        .rsplit_once("[Session(")?
+        .1
+        .split_once(")]")?
+        .0
+        .parse()
+        .ok()
+}
+
+fn is_transport_failure(error: &str) -> bool {
+    matches!(
+        session_error_code(error),
+        Some(-1 | -7 | -9 | -13 | -26 | -27 | -30 | -43 | -45)
+    )
+}
+
+fn list_event(path: String, result: Result<Vec<Entry>>) -> Event {
+    match result {
+        Ok(entries) => Event::Entries(path, entries),
+        Err(error) => Event::ListFailed { path, error },
+    }
+}
+
+// Do not persist server-provided text: it can contain remote paths or usernames.
+fn error_category(error: &str) -> &'static str {
+    if matches!(session_error_code(error), Some(-9 | -30)) {
+        return "timeout";
+    }
+    if is_transport_failure(error) {
+        return "connection";
+    }
+    let error = error.to_ascii_lowercase();
+    if error.contains("permission") || error.contains("sftp(3)") {
+        "permission_denied"
+    } else if error.contains("timeout") || error.contains("timed out") {
+        "timeout"
+    } else if error.contains("no such file") || error.contains("sftp(2)") {
+        "not_found"
+    } else if error.contains("socket")
+        || error.contains("disconnect")
+        || error.contains("connect the file")
+    {
+        "connection"
+    } else {
+        "other"
+    }
+}
+
+// Follow the fresh directory listings, so removed folders are not requested again.
+// Collapsed folders are read when opened, as with normal tree navigation.
+fn refresh_listings(
+    root: String,
+    expanded: &BTreeSet<String>,
+    mut read: impl FnMut(&str) -> Result<Vec<Entry>>,
+) -> Vec<(String, Result<Vec<Entry>>)> {
+    let mut pending = VecDeque::from([(root, 0)]);
+    let mut listings = vec![];
+    while let Some((path, depth)) = pending.pop_front() {
+        let result = read(&path);
+        if let Ok(entries) = &result
+            && depth < 64
+        {
+            for entry in entries {
+                if entry.directory && expanded.contains(&entry.path) {
+                    pending.push_back((entry.path.clone(), depth + 1));
+                }
+            }
+        }
+        listings.push((path, result));
+    }
+    listings
+}
+
+fn read_preview(
+    sftp: &Sftp,
+    handle: &mut Option<(String, ssh2::File)>,
+    path: &str,
+    offset: u64,
+) -> Result<Chunk> {
+    if handle
+        .as_ref()
+        .is_none_or(|(open_path, _)| open_path != path)
+        || offset == 0
+    {
+        *handle = None;
+        let metadata = sftp.lstat(Path::new(path)).map_err(|e| e.to_string())?;
+        if !metadata.is_file() {
+            return Err("Only regular files can be previewed.".into());
+        }
+        let mut file = sftp.open(Path::new(path)).map_err(|e| e.to_string())?;
+        if !file.stat().map_err(|e| e.to_string())?.is_file() {
+            return Err("Only regular files can be previewed.".into());
+        }
+        *handle = Some((path.to_owned(), file));
+    }
+    let (_, file) = handle.as_mut().expect("preview handle opened above");
+    let size = file.stat().map_err(|e| e.to_string())?.size.unwrap_or(0);
+    read_range(file, offset, size)
+}
+
+fn read_range(reader: &mut (impl Read + Seek), offset: u64, size: u64) -> Result<Chunk> {
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::with_capacity(CHUNK_BYTES + 3);
+    reader
+        .take((CHUNK_BYTES + 3) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(Chunk {
+        offset,
+        size,
+        bytes,
+    })
 }
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -196,7 +451,7 @@ fn resolve(profile: &Profile) -> Result<Resolved> {
     })
 }
 enum Connection {
-    Ready(Sftp),
+    Ready(Session, Sftp),
     Trust(String),
 }
 fn connect(profile: &Profile, secret: &str, trusted: Option<&str>) -> Result<Connection> {
@@ -288,10 +543,9 @@ fn connect(profile: &Profile, secret: &str, trusted: Option<&str>) -> Result<Con
     if !session.authenticated() {
         return Err("SFTP authentication failed. Load your key into the SSH agent, or enter a password / private-key passphrase and retry.".into());
     }
-    session
-        .sftp()
-        .map(Connection::Ready)
-        .map_err(|e| e.to_string())
+    session.set_keepalive(true, 30);
+    let sftp = session.sftp().map_err(|e| e.to_string())?;
+    Ok(Connection::Ready(session, sftp))
 }
 
 fn remote_string(path: &Path) -> String {
@@ -320,11 +574,7 @@ fn list(sftp: &Sftp, path: &str) -> Result<Vec<Entry>> {
             size: stat.size.unwrap_or(0),
         })
         .collect();
-    entries.sort_by(|a, b| {
-        b.directory
-            .cmp(&a.directory)
-            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+    entries.sort_by_cached_key(|entry| (!entry.directory, entry.name.to_lowercase()));
     Ok(entries)
 }
 fn copy_stream(
@@ -508,6 +758,129 @@ fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_failures_are_distinct_from_file_and_permission_errors() {
+        for code in [-1, -7, -9, -13, -26, -27, -30, -43, -45] {
+            let error = format!("Cannot list /folder: [Session({code})] error");
+            assert_eq!(session_error_code(&error), Some(code));
+            assert!(is_transport_failure(&error));
+        }
+        assert_eq!(
+            error_category("[Session(-7)] Unable to send STAT/LSTAT/SETSTAT command"),
+            "connection"
+        );
+        assert_eq!(
+            error_category("[Session(-43)] Unable to send FXP_OP"),
+            "connection"
+        );
+        assert!(!is_transport_failure("[SFTP(3)] permission denied"));
+        assert!(!is_transport_failure(
+            "Cannot list /[Session(-7)]: [SFTP(2)] no such file"
+        ));
+        assert!(!is_transport_failure("[Session(-31)] SFTP protocol error"));
+        assert!(!is_transport_failure(
+            "Only regular files can be previewed."
+        ));
+    }
+
+    #[test]
+    fn listing_failures_keep_the_directory_and_have_private_log_categories() {
+        assert!(
+            matches!(list_event("/private/folder".into(), Err("Permission denied".into())), Event::ListFailed { path, error } if path == "/private/folder" && error == "Permission denied")
+        );
+        assert_eq!(
+            error_category("Permission denied for /secret/path"),
+            "permission_denied"
+        );
+        assert_eq!(
+            error_category("Failed waiting on socket: timed out"),
+            "timeout"
+        );
+        assert_eq!(error_category("No such file /secret/path"), "not_found");
+        let worker = Worker::new(egui::Context::default());
+        worker
+            .sender
+            .send(Request::List("/private/folder".into()))
+            .unwrap();
+        assert!(
+            matches!(worker.receiver.recv_timeout(Duration::from_secs(2)).unwrap(), Event::ListFailed { path, .. } if path == "/private/folder")
+        );
+    }
+    #[test]
+    fn refresh_follows_fresh_expanded_folders_and_continues_after_errors() {
+        let expanded = [
+            "/root/open",
+            "/root/gone",
+            "/root/denied",
+            "/root/closed/nested",
+        ]
+        .map(String::from)
+        .into_iter()
+        .collect();
+        let folder = |path: &str| Entry {
+            path: path.into(),
+            name: path.rsplit('/').next().unwrap().into(),
+            directory: true,
+            file: false,
+            size: 0,
+        };
+        let mut calls = vec![];
+        let listings = refresh_listings("/root".into(), &expanded, |path| {
+            calls.push(path.to_owned());
+            match path {
+                "/root" => Ok(vec![
+                    folder("/root/denied"),
+                    folder("/root/open"),
+                    folder("/root/closed"),
+                ]),
+                "/root/denied" => Err("Permission denied".into()),
+                "/root/open" => Ok(vec![]),
+                _ => panic!("Must not request deleted or collapsed folders: {path}"),
+            }
+        });
+        assert_eq!(calls, ["/root", "/root/denied", "/root/open"]);
+        assert!(listings[1].1.is_err());
+        assert!(listings[2].1.is_ok());
+    }
+
+    #[test]
+    fn preview_reads_only_the_requested_range() {
+        struct Counted {
+            data: std::io::Cursor<Vec<u8>>,
+            read: usize,
+        }
+        impl Read for Counted {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.data.read(bytes)?;
+                self.read += n;
+                Ok(n)
+            }
+        }
+        impl Seek for Counted {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                self.data.seek(pos)
+            }
+        }
+        let data: Vec<u8> = (0..CHUNK_BYTES * 20).map(|n| (n % 251) as u8).collect();
+        let mut input = Counted {
+            data: std::io::Cursor::new(data.clone()),
+            read: 0,
+        };
+        let offset = CHUNK_BYTES as u64 * 8;
+        let chunk = read_range(&mut input, offset, data.len() as u64).unwrap();
+        assert_eq!(input.read, CHUNK_BYTES + 3);
+        assert_eq!(
+            chunk.bytes,
+            data[offset as usize..offset as usize + CHUNK_BYTES + 3]
+        );
+        assert_eq!(chunk.offset, offset);
+        assert!(chunk.has_next());
+        let last = read_range(&mut input, data.len() as u64 - 10, data.len() as u64).unwrap();
+        assert_eq!(last.bytes.len(), 10);
+        assert!(!last.has_next());
+    }
+
     #[test]
     fn remote_paths_are_posix_and_cannot_escape_destination() {
         assert_eq!(
@@ -563,17 +936,127 @@ mod tests {
         };
         let trust = match connect(&profile, "", None).unwrap() {
             Connection::Trust(fingerprint) => fingerprint,
-            Connection::Ready(_) => panic!("Use a fixture port absent from known hosts"),
+            Connection::Ready(_, _) => panic!("Use a fixture port absent from known hosts"),
         };
         assert!(matches!(
             connect(&profile, "", Some("incorrect fingerprint")).unwrap(),
             Connection::Trust(_)
         ));
-        let Connection::Ready(sftp) = connect(&profile, "", Some(&trust)).unwrap() else {
+        let Connection::Ready(_session, sftp) = connect(&profile, "", Some(&trust)).unwrap() else {
             panic!("Trust was not honored")
         };
         let remote = tempfile::tempdir().unwrap();
+        let worker = Worker::new(egui::Context::default());
+        worker
+            .sender
+            .send(Request::Connect {
+                profile: profile.clone(),
+                secret: Zeroizing::new(String::new()),
+                trusted: Some(trust.clone()),
+            })
+            .unwrap();
+        assert!(matches!(
+            worker
+                .receiver
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap(),
+            Event::Connected(_)
+        ));
+        let missing = remote_string(&remote.path().join("missing-folder"));
+        worker.sender.send(Request::List(missing.clone())).unwrap();
+        assert!(
+            matches!(worker.receiver.recv_timeout(Duration::from_secs(10)).unwrap(), Event::ListFailed { path, .. } if path == missing)
+        );
+        worker
+            .sender
+            .send(Request::List(remote_string(remote.path())))
+            .unwrap();
+        assert!(
+            matches!(
+                worker
+                    .receiver
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap(),
+                Event::Entries(_, _)
+            ),
+            "listing can succeed after an earlier failure"
+        );
         let local = tempfile::tempdir().unwrap();
+        let preview_path = remote.path().join("reconnect-preview.txt");
+        fs::write(&preview_path, b"preview survives reconnect").unwrap();
+        let receive = || {
+            worker
+                .receiver
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+        };
+        worker
+            .sender
+            .send(Request::Preview {
+                id: 10,
+                remote: remote_string(&preview_path),
+                offset: 0,
+            })
+            .unwrap();
+        assert!(matches!(
+            receive(),
+            Event::Preview {
+                id: 10,
+                result: Ok(_)
+            }
+        ));
+        let (ack, broken) = mpsc::channel();
+        worker
+            .sender
+            .send(Request::DisconnectTransport(ack))
+            .unwrap();
+        broken.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker
+            .sender
+            .send(Request::Preview {
+                id: 11,
+                remote: remote_string(&preview_path),
+                offset: 1,
+            })
+            .unwrap();
+        let Event::Preview {
+            id: 11,
+            result: Err(error),
+        } = receive()
+        else {
+            panic!("broken transport must fail the preview")
+        };
+        assert!(is_transport_failure(&error), "{error}");
+        assert!(matches!(receive(), Event::Disconnected(message) if message.contains("Reconnect")));
+        worker
+            .sender
+            .send(Request::List(remote_string(remote.path())))
+            .unwrap();
+        assert!(
+            matches!(receive(), Event::ListFailed { error, .. } if error.contains("Connect the file browser")),
+            "broken session must not be reused for tree requests"
+        );
+        worker
+            .sender
+            .send(Request::Connect {
+                profile: profile.clone(),
+                secret: Zeroizing::new(String::new()),
+                trusted: Some(trust.clone()),
+            })
+            .unwrap();
+        assert!(matches!(receive(), Event::Connected(_)));
+        worker
+            .sender
+            .send(Request::Preview {
+                id: 12,
+                remote: remote_string(&preview_path),
+                offset: 1,
+            })
+            .unwrap();
+        assert!(
+            matches!(receive(), Event::Preview { id: 12, result: Ok(chunk) } if chunk.offset == 1 && chunk.bytes == b"review survives reconnect")
+        );
+        assert!(_session.keepalive_send().is_ok());
         let folder = local.path().join("folder with spaces");
         fs::create_dir_all(folder.join("nested")).unwrap();
         let data: Vec<_> = (0..180_000).map(|n| (n % 251) as u8).collect();
@@ -600,6 +1083,20 @@ mod tests {
                 .any(|e| e.directory && e.name == "folder with spaces")
         );
         let destination = local.path().join("download.bin");
+        let mut handle = None;
+        let first = read_preview(&sftp, &mut handle, remote_file.to_str().unwrap(), 0).unwrap();
+        assert_eq!(first.bytes, data[..CHUNK_BYTES + 3]);
+        let second = read_preview(
+            &sftp,
+            &mut handle,
+            remote_file.to_str().unwrap(),
+            CHUNK_BYTES as u64,
+        )
+        .unwrap();
+        assert_eq!(second.bytes, data[CHUNK_BYTES..CHUNK_BYTES * 2 + 3]);
+        assert!(handle.is_some());
+        assert!(read_preview(&sftp, &mut handle, remote.path().to_str().unwrap(), 0).is_err());
+        assert_eq!(fs::read(&remote_file).unwrap(), data);
         download(
             &sftp,
             remote_file.to_str().unwrap(),

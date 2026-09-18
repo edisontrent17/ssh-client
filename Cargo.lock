@@ -2533,9 +2533,11 @@ name = "ssh-client"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "cc",
  "directories",
  "eframe",
  "egui_term",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",

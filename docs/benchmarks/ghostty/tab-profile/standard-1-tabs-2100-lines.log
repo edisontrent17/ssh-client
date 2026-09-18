@@ -1,0 +1,7 @@
+Fixture ready
+Fixture geometry: content=[[0.0 0.0] - [1280.0 800.0]], ui=[[0.0 0.0] - [1280.0 800.0]], viewport=Some([[560.0 151.2] - [1840.0 951.2]])
+{"font_atlas":[16384,32],"live_rust_bytes":18162427,"peak_rust_bytes":18163074,"texture_bytes":119808}
+{"font_atlas":[16384,32],"live_rust_bytes":24387800,"peak_rust_bytes":26939350,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":24387800,"peak_rust_bytes":26939350,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":24387800,"peak_rust_bytes":26939350,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":24387800,"peak_rust_bytes":26939350,"texture_bytes":2216960}

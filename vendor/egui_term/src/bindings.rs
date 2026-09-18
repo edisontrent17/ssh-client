@@ -1,5 +1,6 @@
 use crate::TerminalMode;
 use egui::{Key, Modifiers, PointerButton};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq)]
 pub enum BindingAction {
@@ -79,7 +80,7 @@ macro_rules! generate_bindings {
 
 #[derive(Clone, Debug)]
 pub struct BindingsLayout {
-    layout: Vec<(Binding<InputKind>, BindingAction)>,
+    layout: Arc<Vec<(Binding<InputKind>, BindingAction)>>,
 }
 
 impl Default for BindingsLayout {
@@ -90,23 +91,28 @@ impl Default for BindingsLayout {
 
 impl BindingsLayout {
     pub fn new() -> Self {
-        let mut layout = Self {
-            layout: default_keyboard_bindings(),
-        };
-        layout.add_bindings(platform_keyboard_bindings());
-        layout.add_bindings(mouse_default_bindings());
-        layout
+        static DEFAULT: OnceLock<BindingsLayout> = OnceLock::new();
+        DEFAULT
+            .get_or_init(|| {
+                let mut layout = Self {
+                    layout: Arc::new(default_keyboard_bindings()),
+                };
+                layout.add_bindings(platform_keyboard_bindings());
+                layout.add_bindings(mouse_default_bindings());
+                layout
+            })
+            .clone()
     }
 
     pub fn add_bindings(&mut self, bindings: Vec<(Binding<InputKind>, BindingAction)>) {
+        let layout = Arc::make_mut(&mut self.layout);
         for (binding, action) in bindings {
-            match self
-                .layout
+            match layout
                 .iter()
-                .position(|(layout_binding, _)| layout_binding == &binding)
+                .position(|(candidate, _)| candidate == &binding)
             {
-                Some(position) => self.layout[position] = (binding, action),
-                None => self.layout.push((binding, action)),
+                Some(position) => layout[position] = (binding, action),
+                None => layout.push((binding, action)),
             }
         }
     }
@@ -117,7 +123,7 @@ impl BindingsLayout {
         modifiers: Modifiers,
         terminal_mode: TerminalMode,
     ) -> BindingAction {
-        for (binding, action) in &self.layout {
+        for (binding, action) in self.layout.iter() {
             let is_triggered = binding.target == input
                 && modifiers.matches_exact(binding.modifiers)
                 && terminal_mode.contains(binding.terminal_mode_include)
@@ -347,6 +353,26 @@ mod tests {
     use crate::bindings::MouseBinding;
     use crate::TerminalMode;
     use egui::{Key, Modifiers, PointerButton};
+    use std::sync::Arc;
+
+    #[test]
+    fn custom_bindings_do_not_change_shared_defaults() {
+        let original = BindingsLayout::new();
+        let mut custom = BindingsLayout::new();
+        assert!(Arc::ptr_eq(&original.layout, &custom.layout));
+        let (binding, action) = original.layout[0].clone();
+        custom.add_bindings(vec![(binding.clone(), BindingAction::Char('!'))]);
+        assert_eq!(original.layout[0].1, action);
+        assert_eq!(BindingsLayout::new().layout[0].1, action);
+        assert_eq!(
+            custom.get_action(
+                binding.target,
+                binding.modifiers,
+                binding.terminal_mode_include
+            ),
+            BindingAction::Char('!')
+        );
+    }
 
     #[test]
     fn add_new_custom_keyboard_binding() {
@@ -453,7 +479,7 @@ mod tests {
     #[test]
     fn get_action() {
         let current_layout = BindingsLayout::default();
-        for (bind, action) in &current_layout.layout {
+        for (bind, action) in current_layout.layout.iter() {
             let found_action = current_layout.get_action(
                 bind.target.clone(),
                 bind.modifiers,
@@ -474,7 +500,7 @@ mod tests {
             C, Modifiers::SHIFT | Modifiers::CTRL;      BindingAction::Copy;
         );
         current_layout.add_bindings(custom_bindings.clone());
-        for (bind, action) in &current_layout.layout {
+        for (bind, action) in current_layout.layout.iter() {
             let found_action = current_layout.get_action(
                 bind.target.clone(),
                 bind.modifiers,

@@ -10,3 +10,6 @@ egui = "0.35"
 alacritty_terminal = "0.26"
 anyhow = "1"
 open = "5"
+
+[features]
+test-support = []

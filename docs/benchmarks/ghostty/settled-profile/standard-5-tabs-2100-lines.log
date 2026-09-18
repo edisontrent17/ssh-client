@@ -1,0 +1,38 @@
+Fixture ready
+Fixture geometry: content=[[0.0 0.0] - [1280.0 800.0]], ui=[[0.0 0.0] - [1280.0 800.0]], viewport=Some([[560.0 151.2] - [1840.0 951.2]])
+{"font_atlas":[16384,32],"live_rust_bytes":34697233,"peak_rust_bytes":34697880,"texture_bytes":119808}
+{"font_atlas":[16384,32],"live_rust_bytes":57246418,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57246886,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245538,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":57245250,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+Fixture closing tabs
+Fixture tabs closed
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11734254,"peak_rust_bytes":57638828,"texture_bytes":2216960}

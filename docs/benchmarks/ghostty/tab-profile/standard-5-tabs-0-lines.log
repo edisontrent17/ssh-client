@@ -1,0 +1,25 @@
+Fixture ready
+Fixture geometry: content=[[0.0 0.0] - [1280.0 800.0]], ui=[[0.0 0.0] - [1280.0 800.0]], viewport=Some([[560.0 155.0] - [1840.0 955.0]])
+{"font_atlas":[16384,32],"live_rust_bytes":34703662,"peak_rust_bytes":34704309,"texture_bytes":119808}
+{"font_atlas":[16384,32],"live_rust_bytes":34394728,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":34393632,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":34394656,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":34393632,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":34393632,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":34393632,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":34394908,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":34395268,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":34393920,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":34393632,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":34393632,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+Fixture tabs closed
+{"font_atlas":[16384,32],"live_rust_bytes":11629027,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11627779,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11627779,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11627779,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11627779,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11627779,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11627779,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11627779,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11627779,"peak_rust_bytes":36693966,"texture_bytes":2216960}
+{"font_atlas":[16384,32],"live_rust_bytes":11627779,"peak_rust_bytes":36693966,"texture_bytes":2216960}

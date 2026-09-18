@@ -1,0 +1,78 @@
+{
+  "cycles": 3,
+  "history_lines": 2000,
+  "measurements": [
+    {
+      "live_rust_bytes": 8680321,
+      "peak_rust_bytes": 9109428,
+      "stage": "empty"
+    },
+    {
+      "live_rust_bytes": 17599317,
+      "peak_rust_bytes": 17966441,
+      "stage": "cycle_1_one_tab"
+    },
+    {
+      "live_rust_bytes": 51200139,
+      "peak_rust_bytes": 51600635,
+      "stage": "cycle_1_five_tabs"
+    },
+    {
+      "live_rust_bytes": 51200831,
+      "peak_rust_bytes": 51601319,
+      "stage": "cycle_1_switched_tabs"
+    },
+    {
+      "live_rust_bytes": 9064285,
+      "peak_rust_bytes": 51601319,
+      "stage": "cycle_1_closed_tabs"
+    },
+    {
+      "live_rust_bytes": 17752345,
+      "peak_rust_bytes": 51601319,
+      "stage": "cycle_2_one_tab"
+    },
+    {
+      "live_rust_bytes": 51202879,
+      "peak_rust_bytes": 51603375,
+      "stage": "cycle_2_five_tabs"
+    },
+    {
+      "live_rust_bytes": 51203571,
+      "peak_rust_bytes": 51604059,
+      "stage": "cycle_2_switched_tabs"
+    },
+    {
+      "live_rust_bytes": 9067025,
+      "peak_rust_bytes": 51604059,
+      "stage": "cycle_2_closed_tabs"
+    },
+    {
+      "live_rust_bytes": 17755085,
+      "peak_rust_bytes": 51604059,
+      "stage": "cycle_3_one_tab"
+    },
+    {
+      "live_rust_bytes": 51205619,
+      "peak_rust_bytes": 51606115,
+      "stage": "cycle_3_five_tabs"
+    },
+    {
+      "live_rust_bytes": 51206311,
+      "peak_rust_bytes": 51606799,
+      "stage": "cycle_3_switched_tabs"
+    },
+    {
+      "live_rust_bytes": 9069765,
+      "peak_rust_bytes": 51606799,
+      "stage": "cycle_3_closed_tabs"
+    }
+  ],
+  "metric": "live Rust allocation bytes; excludes allocator overhead, native libraries and GPU",
+  "schema": 1,
+  "tabs": 5,
+  "viewport": [
+    1280,
+    800
+  ]
+}
