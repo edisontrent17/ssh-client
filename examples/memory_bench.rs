@@ -105,6 +105,7 @@ mod app {
                 app.tabs.push(Tab {
                     id,
                     label: format!("Local {id}"),
+                    profile: None,
                     backend: TerminalBackend::in_memory(id),
                     ended: false,
                 });

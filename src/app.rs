@@ -25,8 +25,14 @@ use zeroize::Zeroizing;
 struct Tab {
     id: u64,
     label: String,
+    profile: Option<Profile>,
     backend: TerminalBackend,
     ended: bool,
+}
+struct TerminalDrop {
+    tab_id: u64,
+    profile: Profile,
+    local: Vec<PathBuf>,
 }
 struct ConnectionEditor {
     profile: Profile,
@@ -57,9 +63,12 @@ pub struct Relay {
     files: Worker,
     files_connected: bool,
     files_busy: bool,
+    transfer_active: bool,
     file_list_pending: BTreeSet<String>,
     file_worker_stopped: bool,
     files_label: String,
+    pending_terminal_drop: Option<TerminalDrop>,
+    clipboard_copy: Option<String>,
     secret: Zeroizing<String>,
     pending_profile: Option<Profile>,
     fingerprint: Option<String>,
@@ -152,9 +161,12 @@ impl Relay {
             files: Worker::new(ctx.clone()),
             files_connected: false,
             files_busy: false,
+            transfer_active: false,
             file_list_pending: BTreeSet::new(),
             file_worker_stopped: false,
             files_label: String::new(),
+            pending_terminal_drop: None,
+            clipboard_copy: None,
             secret: Zeroizing::new(String::new()),
             pending_profile: None,
             fingerprint: None,
@@ -353,6 +365,7 @@ impl Relay {
                 self.tabs.push(Tab {
                     id,
                     label: self.draft.label().into(),
+                    profile: Some(self.draft.clone()),
                     backend,
                     ended: false,
                 });
@@ -383,6 +396,7 @@ impl Relay {
                 self.tabs.push(Tab {
                     id,
                     label: format!("Local · Ghostty {id}"),
+                    profile: None,
                     backend,
                     ended: false,
                 });
@@ -401,18 +415,29 @@ impl Relay {
         }
     }
     fn files_connect(&mut self, trusted: Option<String>, ctx: &egui::Context) {
+        let profile = if trusted.is_some() || self.resume_preview_after_connect {
+            self.pending_profile
+                .clone()
+                .unwrap_or_else(|| self.draft.clone())
+        } else if let Some(drop) = &self.pending_terminal_drop {
+            drop.profile.clone()
+        } else {
+            self.draft.clone()
+        };
+        self.files_connect_profile(profile, trusted, ctx);
+    }
+    fn files_connect_profile(
+        &mut self,
+        profile: Profile,
+        trusted: Option<String>,
+        ctx: &egui::Context,
+    ) {
         if self.file_worker_stopped {
             self.files = Worker::new(ctx.clone());
             self.file_worker_stopped = false;
         }
         self.file_list_pending.clear();
-        let profile = if trusted.is_some() || self.resume_preview_after_connect {
-            self.pending_profile
-                .clone()
-                .unwrap_or_else(|| self.draft.clone())
-        } else {
-            self.draft.clone()
-        };
+        self.transfer_active = false;
         if let Err(error) = profile.ssh_args() {
             self.message = error;
             return;
@@ -441,9 +466,46 @@ impl Relay {
             trusted,
         });
     }
+    fn terminal_drop(&mut self, local: Vec<PathBuf>, ctx: &egui::Context) {
+        if local.is_empty() {
+            return;
+        }
+        let Some(tab) = self.tabs.iter().find(|tab| Some(tab.id) == self.active) else {
+            self.message = "Open an SSH terminal before dropping a file here.".into();
+            return;
+        };
+        let Some(profile) = tab.profile.clone() else {
+            self.message = "File drops need an SSH terminal, not the local demo.".into();
+            return;
+        };
+        if tab.ended {
+            self.message = "Reconnect this SSH terminal before dropping files.".into();
+            return;
+        }
+        if self.files_busy || self.transfer_active || self.pending_terminal_drop.is_some() {
+            self.message =
+                "Wait for the current file operation before uploading more files.".into();
+            return;
+        }
+        let tab_id = tab.id;
+        self.file_panel = true;
+        if self.files_connected && self.pending_profile.as_ref() == Some(&profile) {
+            self.transfer(Request::UploadToTerminal { local, tab_id });
+            self.message = "Uploading to ~/relay-uploads…".into();
+        } else {
+            self.pending_terminal_drop = Some(TerminalDrop {
+                tab_id,
+                profile: profile.clone(),
+                local,
+            });
+            self.file_panel = true;
+            self.files_connect_profile(profile, None, ctx);
+        }
+    }
     fn send(&mut self, request: Request) {
         if self.files.sender.send(request).is_err() {
             self.files_busy = false;
+            self.transfer_active = false;
             self.message = "The file worker stopped. Restart the app to reconnect.".into();
         }
     }
@@ -459,7 +521,7 @@ impl Relay {
                 path,
                 "The file worker stopped. Reconnect to try again.".into(),
             );
-            self.files_busy = false;
+            self.files_busy = self.transfer_active;
         }
     }
     fn refresh_directory_listing(&mut self) {
@@ -532,6 +594,7 @@ impl Relay {
     }
     fn transfer(&mut self, request: Request) {
         self.files.cancel.store(false, Ordering::Relaxed);
+        self.transfer_active = true;
         self.files_busy = true;
         self.progress = None;
         self.send(request);
@@ -767,6 +830,7 @@ impl Relay {
                             );
                         }
                         self.files_busy = false;
+                        self.transfer_active = false;
                         self.files_connected = false;
                         self.preview_inflight = None;
                         self.message =
@@ -780,6 +844,7 @@ impl Relay {
                 Event::Disconnected(message) => {
                     self.files_connected = false;
                     self.files_busy = false;
+                    self.transfer_active = false;
                     self.progress = None;
                     self.preview_inflight = None;
                     for path in std::mem::take(&mut self.file_list_pending) {
@@ -802,13 +867,24 @@ impl Relay {
                 }
                 Event::Connected(home) => {
                     self.files_connected = true;
-                    self.files_busy = false;
+                    self.files_busy = self.transfer_active;
                     self.root = home.clone();
                     self.destination = home.clone();
                     self.expanded.insert(home.clone());
                     self.refresh(home);
                     self.secret = Zeroizing::new(String::new());
                     self.message = format!("SFTP connected: {}", self.files_label);
+                    if let Some(drop) = self.pending_terminal_drop.take() {
+                        if self.pending_profile.as_ref() == Some(&drop.profile) {
+                            self.transfer(Request::UploadToTerminal {
+                                local: drop.local,
+                                tab_id: drop.tab_id,
+                            });
+                            self.message = "Uploading to ~/relay-uploads…".into();
+                        } else {
+                            self.pending_terminal_drop = Some(drop);
+                        }
+                    }
                     if self.resume_preview_after_connect {
                         self.resume_preview_after_connect = false;
                         if let Some(preview) = &mut self.preview {
@@ -833,17 +909,17 @@ impl Relay {
                 }
                 Event::Entries(path, entries) => {
                     self.file_list_pending.remove(&path);
-                    self.files_busy = !self.file_list_pending.is_empty();
+                    self.files_busy = self.transfer_active || !self.file_list_pending.is_empty();
                     self.apply_entries(path, entries);
                 }
                 Event::ListFailed { path, error } => {
                     self.file_list_pending.remove(&path);
-                    self.files_busy = !self.file_list_pending.is_empty();
+                    self.files_busy = self.transfer_active || !self.file_list_pending.is_empty();
                     self.message = format!("Could not load {path}: {error}");
                     self.tree.fail(path, error);
                 }
                 Event::Refreshed(listings) => {
-                    self.files_busy = !self.file_list_pending.is_empty();
+                    self.files_busy = self.transfer_active || !self.file_list_pending.is_empty();
                     let mut errors = vec![];
                     for (path, result) in listings {
                         match result {
@@ -862,13 +938,52 @@ impl Relay {
                 }
                 Event::Progress { name, done, total } => self.progress = Some((name, done, total)),
                 Event::Done(message) => {
-                    self.files_busy = false;
+                    self.transfer_active = false;
+                    self.files_busy = !self.file_list_pending.is_empty();
                     self.progress = None;
                     self.message = message;
                     self.refresh(self.destination.clone());
                 }
+                Event::TerminalUploaded {
+                    tab_id,
+                    paths,
+                    error,
+                } => {
+                    self.transfer_active = false;
+                    self.files_busy = !self.file_list_pending.is_empty();
+                    self.progress = None;
+                    let count = paths.len();
+                    if count > 0 {
+                        let copied = paths
+                            .iter()
+                            .map(|path| shell_quote_path(path))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        self.clipboard_copy = Some(copied.clone());
+                        self.message = if let Some(error) = error {
+                            format!(
+                                "Uploaded {count} item{} · copied successful remote path{} · remaining upload failed: {error}",
+                                if count == 1 { "" } else { "s" },
+                                if count == 1 { "" } else { "s" },
+                            )
+                        } else if count == 1 {
+                            format!(
+                                "Uploaded to {} · remote path copied to Mac clipboard",
+                                paths[0]
+                            )
+                        } else {
+                            format!("Uploaded {count} items · remote paths copied to Mac clipboard")
+                        };
+                        diagnostics::record(
+                            "terminal_drop_uploaded",
+                            serde_json::json!({"tab_id": tab_id, "count": count}),
+                        );
+                        self.refresh(self.root.clone());
+                    }
+                }
                 Event::Error(message) => {
-                    self.files_busy = false;
+                    self.transfer_active = false;
+                    self.files_busy = !self.file_list_pending.is_empty();
                     self.progress = None;
                     if self.resume_preview_after_connect
                         && let Some(preview) = &mut self.preview
@@ -887,7 +1002,10 @@ impl Relay {
                 DialogResult::Download(remote, local) => {
                     self.transfer(Request::Download { remote, local })
                 }
-                DialogResult::Cancelled => self.files_busy = false,
+                DialogResult::Cancelled => {
+                    self.transfer_active = false;
+                    self.files_busy = false;
+                }
             }
         }
         self.pump_preview();
@@ -1107,8 +1225,20 @@ impl Relay {
             }
         });
         if !self.files_connected {
-            ui.label("Browse a host and drop files or folders to upload them.");
-            ui.weak("Select a connection on the left to browse its files.");
+            if let Some(drop) = &self.pending_terminal_drop {
+                ui.label(format!(
+                    "Upload queued for {} · ~/relay-uploads",
+                    drop.profile.label()
+                ));
+                ui.weak("Connect files to finish the upload and copy its remote path.");
+                if ui.small_button("Cancel queued upload").clicked() {
+                    self.pending_terminal_drop = None;
+                    self.message = "Queued upload cancelled.".into();
+                }
+            } else {
+                ui.label("Browse a host and drop files or folders to upload them.");
+                ui.weak("Select a connection on the left to browse its files.");
+            }
             ui.label("Password / key passphrase (optional)");
             ui.add(
                 egui::TextEdit::singleline(&mut *self.secret)
@@ -1118,7 +1248,9 @@ impl Relay {
             );
             if ui
                 .add_enabled(
-                    self.selected.is_some() && !self.files_busy && self.fingerprint.is_none(),
+                    (self.selected.is_some() || self.pending_terminal_drop.is_some())
+                        && !self.files_busy
+                        && self.fingerprint.is_none(),
                     appearance::primary("Connect files"),
                 )
                 .clicked()
@@ -1138,6 +1270,7 @@ impl Relay {
                     }
                     if ui.button("Cancel").clicked() {
                         self.fingerprint = None;
+                        self.pending_terminal_drop = None;
                         self.secret = Zeroizing::new(String::new());
                     }
                 });
@@ -1191,6 +1324,7 @@ impl Relay {
                 self.file_list_pending.clear();
                 self.file_worker_stopped = false;
                 self.files_busy = false;
+                self.transfer_active = false;
                 self.preview = None;
                 self.preview_active = false;
                 self.preview_inflight = None;
@@ -1498,6 +1632,9 @@ impl Relay {
             );
         }
         self.drain_events();
+        if let Some(path) = self.clipboard_copy.take() {
+            ui.ctx().copy_text(path);
+        }
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add(
@@ -1538,37 +1675,21 @@ impl Relay {
                     .inner_margin(14.0),
             )
             .show(ui, |ui| self.host_panel(ui));
-        if self.file_panel {
-            egui::Panel::right("files")
-                .resizable(true)
-                .default_size(350.0)
-                .size_range(270.0..=600.0)
-                .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(14.0))
-                .show(ui, |ui| self.file_panel_ui(ui));
-        }
-        let dropped: Vec<_> = ui.ctx().input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .filter_map(|f| f.path.clone())
-                .collect()
-        });
-        if !dropped.is_empty() && self.connection_editor.is_none() {
-            if !self.files_connected {
-                self.message = "Connect the file browser before dropping files.".into();
-            } else if self.files_busy {
-                self.message =
-                    "Wait for the current file operation before uploading more files.".into();
-            } else if self.file_panel {
-                self.transfer(Request::Upload {
-                    local: dropped,
-                    remote: self.destination.clone(),
-                });
-            } else {
-                self.message = "Drop files onto the Remote files panel to upload them.".into();
-            }
-        }
-        egui::CentralPanel::default()
+        let files_rect = if self.file_panel {
+            Some(
+                egui::Panel::right("files")
+                    .resizable(true)
+                    .default_size(350.0)
+                    .size_range(270.0..=600.0)
+                    .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(14.0))
+                    .show(ui, |ui| self.file_panel_ui(ui))
+                    .response
+                    .rect,
+            )
+        } else {
+            None
+        };
+        let central_rect = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(10.0))
             .show(ui, |ui| {
                 let mut close = None;
@@ -1654,7 +1775,43 @@ impl Relay {
                         ui.weak("Connect the file browser to explore folders and transfer files.");
                     });
                 }
-            });
+            })
+            .response
+            .rect;
+        let (dropped, pointer) = ui.ctx().input(|input| {
+            (
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|file| file.path.clone())
+                    .collect::<Vec<_>>(),
+                input.pointer.latest_pos(),
+            )
+        });
+        if !dropped.is_empty() && self.connection_editor.is_none() {
+            if pointer.is_some_and(|pos| central_rect.contains(pos)) {
+                if self.preview_active {
+                    self.message = "Select an SSH terminal before dropping a file here.".into();
+                } else {
+                    self.terminal_drop(dropped, ui.ctx());
+                }
+            } else if files_rect.is_some_and(|rect| pointer.is_none_or(|pos| rect.contains(pos))) {
+                if !self.files_connected {
+                    self.message = "Connect the file browser before dropping files.".into();
+                } else if self.files_busy {
+                    self.message =
+                        "Wait for the current file operation before uploading more files.".into();
+                } else {
+                    self.transfer(Request::Upload {
+                        local: dropped,
+                        remote: self.destination.clone(),
+                    });
+                }
+            } else {
+                self.message = "Drop onto an SSH terminal or the Remote files panel.".into();
+            }
+        }
         for tab in &mut self.tabs {
             tab.backend
                 .set_visible(!self.preview_active && self.active == Some(tab.id));
@@ -1682,11 +1839,156 @@ fn bytes(size: u64) -> String {
         format!("{size} B")
     }
 }
+fn shell_quote_path(path: &str) -> String {
+    if !path.is_empty()
+        && path
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "/._-".contains(ch))
+    {
+        path.to_owned()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicBool};
+
+    #[test]
+    fn uploaded_path_is_safe_to_paste_into_a_shell() {
+        assert_eq!(
+            shell_quote_path("/home/ubuntu/relay-uploads/photo.png"),
+            "/home/ubuntu/relay-uploads/photo.png"
+        );
+        assert_eq!(
+            shell_quote_path("/home/ubuntu/relay-uploads/my photo.png"),
+            "'/home/ubuntu/relay-uploads/my photo.png'"
+        );
+        assert_eq!(
+            shell_quote_path("/home/ubuntu/relay-uploads/it's here.png"),
+            "'/home/ubuntu/relay-uploads/it'\\''s here.png'"
+        );
+    }
+
+    #[cfg(feature = "terminal-fixture")]
+    #[test]
+    fn terminal_drop_connects_the_tabs_host_and_copies_only_after_success() {
+        let ctx = egui::Context::default();
+        let mut app = Relay::from_context(&ctx);
+        let (sender, requests) = mpsc::channel();
+        let (events, receiver) = mpsc::channel();
+        app.files = Worker {
+            sender,
+            receiver,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        let profile = Profile {
+            host: "terminal.example".into(),
+            ..Default::default()
+        };
+        app.tabs.push(Tab {
+            id: 42,
+            label: "terminal".into(),
+            profile: Some(profile.clone()),
+            backend: TerminalBackend::in_memory(42),
+            ended: false,
+        });
+        app.active = Some(42);
+        app.files_connected = true;
+        app.pending_profile = Some(Profile {
+            host: "other.example".into(),
+            ..Default::default()
+        });
+        let path = PathBuf::from("/tmp/my photo.png");
+        app.terminal_drop(vec![path.clone()], &ctx);
+        assert!(
+            matches!(requests.try_recv().unwrap(), Request::Connect { profile: connected, .. } if connected == profile)
+        );
+        assert!(app.clipboard_copy.is_none());
+        events.send(Event::Connected("/home/test".into())).unwrap();
+        app.drain_events();
+        assert!(
+            matches!(requests.try_recv().unwrap(), Request::List(path) if path == "/home/test")
+        );
+        assert!(
+            matches!(requests.try_recv().unwrap(), Request::UploadToTerminal { local, tab_id: 42 } if local == vec![path])
+        );
+        events
+            .send(Event::Entries("/home/test".into(), vec![]))
+            .unwrap();
+        app.drain_events();
+        assert!(
+            app.files_busy,
+            "the initial listing must not unlock an upload"
+        );
+        assert!(app.transfer_active);
+        assert!(app.clipboard_copy.is_none());
+        events
+            .send(Event::TerminalUploaded {
+                tab_id: 42,
+                paths: vec!["/home/test/relay-uploads/my photo.png".into()],
+                error: None,
+            })
+            .unwrap();
+        app.drain_events();
+        assert_eq!(
+            app.clipboard_copy.as_deref(),
+            Some("'/home/test/relay-uploads/my photo.png'")
+        );
+        assert!(app.message.contains("copied"));
+    }
+
+    #[cfg(feature = "terminal-fixture")]
+    #[test]
+    fn desktop_drop_over_terminal_uses_the_active_terminal_host() {
+        let ctx = egui::Context::default();
+        let mut app = Relay::from_context(&ctx);
+        let (sender, requests) = mpsc::channel();
+        let (_events, receiver) = mpsc::channel();
+        app.files = Worker {
+            sender,
+            receiver,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        let profile = Profile {
+            host: "terminal.example".into(),
+            ..Default::default()
+        };
+        app.tabs.push(Tab {
+            id: 7,
+            label: "terminal".into(),
+            profile: Some(profile.clone()),
+            backend: TerminalBackend::in_memory(7),
+            ended: false,
+        });
+        app.active = Some(7);
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("photo.png");
+        std::fs::write(&file, b"image").unwrap();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 720.0),
+            )),
+            events: vec![egui::Event::PointerMoved(egui::pos2(500.0, 360.0))],
+            dropped_files: vec![egui::DroppedFile {
+                path: Some(file.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| app.render(ui));
+        assert!(
+            matches!(requests.try_recv().unwrap(), Request::Connect { profile: connected, .. } if connected == profile),
+            "a drop in the center panel should connect the terminal's host"
+        );
+        assert_eq!(
+            app.pending_terminal_drop.as_ref().map(|drop| &drop.local),
+            Some(&vec![file])
+        );
+    }
 
     #[test]
     fn disconnected_preview_reconnects_original_host_and_resumes_at_same_offset() {
@@ -1889,6 +2191,7 @@ mod tests {
         app.tabs.push(Tab {
             id: 42,
             label: "test".into(),
+            profile: None,
             backend,
             ended: false,
         });

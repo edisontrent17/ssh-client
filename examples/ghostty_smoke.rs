@@ -98,6 +98,7 @@ mod app {
             self.relay.tabs.push(Tab {
                 id,
                 label: label.into(),
+                profile: None,
                 backend,
                 ended: false,
             });

@@ -59,6 +59,7 @@ mod app {
                 app.tabs.push(Tab {
                     id,
                     label: format!("Local {id}"),
+                    profile: None,
                     backend,
                     ended: false,
                 });
@@ -143,6 +144,7 @@ mod app {
         app.tabs.push(Tab {
             id: 1,
             label: "Production".into(),
+            profile: None,
             backend,
             ended: false,
         });

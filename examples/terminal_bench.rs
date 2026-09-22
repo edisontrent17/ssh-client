@@ -83,6 +83,7 @@ mod app {
                     app.tabs.push(Tab {
                         id,
                         label: format!("Mock {}", index + 1),
+                        profile: None,
                         backend: TerminalBackend::in_memory(id),
                         ended: false,
                     });

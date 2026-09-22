@@ -54,6 +54,10 @@ pub enum Request {
         local: Vec<PathBuf>,
         remote: String,
     },
+    UploadToTerminal {
+        local: Vec<PathBuf>,
+        tab_id: u64,
+    },
     Download {
         remote: String,
         local: PathBuf,
@@ -64,11 +68,26 @@ pub enum Event {
     Disconnected(String),
     Trust(String),
     Entries(String, Vec<Entry>),
-    ListFailed { path: String, error: String },
+    ListFailed {
+        path: String,
+        error: String,
+    },
     Refreshed(Vec<(String, Result<Vec<Entry>>)>),
-    Preview { id: u64, result: Result<Chunk> },
-    Progress { name: String, done: u64, total: u64 },
+    Preview {
+        id: u64,
+        result: Result<Chunk>,
+    },
+    Progress {
+        name: String,
+        done: u64,
+        total: u64,
+    },
     Done(String),
+    TerminalUploaded {
+        tab_id: u64,
+        paths: Vec<String>,
+        error: Option<String>,
+    },
     Error(String),
 }
 pub struct Worker {
@@ -87,6 +106,7 @@ impl Worker {
         std::thread::Builder::new().name(format!("sftp-worker-{worker_id}")).spawn(move || {
             let mut connection: Option<Sftp> = None;
             let mut session: Option<Session> = None;
+            let mut home: Option<String> = None;
             let mut preview: Option<(String, ssh2::File)> = None;
             let mut request_id = 0_u64;
             loop {
@@ -114,6 +134,7 @@ impl Worker {
                     Request::Preview { .. } => "preview",
                     Request::ClosePreview => "close_preview",
                     Request::Upload { .. } => "upload",
+                    Request::UploadToTerminal { .. } => "terminal_upload",
                     Request::Download { .. } => "download",
                 };
                 let started = Instant::now();
@@ -123,6 +144,7 @@ impl Worker {
                 let report = |event: Event| {
                     let errors: Vec<&str> = match &event {
                         Event::Error(error) | Event::ListFailed { error, .. } | Event::Preview { result: Err(error), .. } => vec![error],
+                        Event::TerminalUploaded { error: Some(error), .. } => vec![error],
                         Event::Refreshed(listings) => listings.iter().filter_map(|(_, result)| result.as_ref().err().map(String::as_str)).collect(),
                         _ => vec![],
                     };
@@ -150,10 +172,13 @@ impl Worker {
                         trusted,
                     } => {
                         discard_connection(&mut session, &mut connection, &mut preview);
+                        home = None;
                         match connect(&profile, &secret, trusted.as_deref()) {
                             Ok(Connection::Ready(active_session, sftp)) => match sftp.realpath(Path::new(".")) {
-                                Ok(home) => {
-                                    report(Event::Connected(remote_string(&home)));
+                                Ok(home_path) => {
+                                    let root = remote_string(&home_path);
+                                    report(Event::Connected(root.clone()));
+                                    home = Some(root);
                                     connection = Some(sftp);
                                     session = Some(active_session);
                                     Ok(())
@@ -213,6 +238,38 @@ impl Worker {
                         }
                         None => Err("Connect the file browser first.".into()),
                     },
+                    Request::UploadToTerminal { local, tab_id } => match (connection.as_ref(), home.as_deref()) {
+                        (Some(sftp), Some(home)) => (|| -> Result<()> {
+                            if local.is_empty() {
+                                return Err("Choose at least one file or folder to upload.".into());
+                            }
+                            let destination = terminal_upload_directory(sftp, home)?;
+                            let mut paths = Vec::with_capacity(local.len());
+                            for path in &local {
+                                match upload_terminal_item(
+                                    sftp,
+                                    path,
+                                    &destination,
+                                    &stopped,
+                                    &report,
+                                ) {
+                                    Ok(uploaded) => paths.push(uploaded),
+                                    Err(error) if paths.is_empty() => return Err(error),
+                                    Err(error) => {
+                                        report(Event::TerminalUploaded {
+                                            tab_id,
+                                            paths,
+                                            error: Some(error),
+                                        });
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            report(Event::TerminalUploaded { tab_id, paths, error: None });
+                            Ok(())
+                        })(),
+                        _ => Err("Connect the file browser first.".into()),
+                    },
                     Request::Download { remote, local } => match connection.as_ref() {
                         Some(sftp) => {
                             download(sftp, &remote, &local, &stopped, &report).map(|_| {
@@ -230,6 +287,7 @@ impl Worker {
                         diagnostics::record("sftp_connection_lost", serde_json::json!({"worker_id": worker_id, "request_id": request_id, "cause": "request", "session_code": session_error_code(&error)}));
                         report(Event::Disconnected(connection_lost_message(&error)));
                         discard_connection(&mut session, &mut connection, &mut preview);
+                        home = None;
                 }
                 diagnostics::record("sftp_request_finished", serde_json::json!({"worker_id": worker_id, "request_id": request_id, "operation": operation, "success": !failed.get(), "elapsed_ms": started.elapsed().as_millis()}));
             }
@@ -551,6 +609,111 @@ fn connect(profile: &Profile, secret: &str, trusted: Option<&str>) -> Result<Con
 fn remote_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
+fn terminal_upload_directory(sftp: &Sftp, home: &str) -> Result<String> {
+    let destination = join_remote(home, "relay-uploads")?;
+    match sftp.lstat(Path::new(&destination)) {
+        Ok(stat) if stat.is_dir() => Ok(destination),
+        Ok(_) => Err(format!(
+            "Upload destination is not a directory: {destination}"
+        )),
+        Err(error) if error.code() == ssh2::ErrorCode::SFTP(2) => {
+            match sftp.mkdir(Path::new(&destination), 0o700) {
+                Ok(()) => Ok(destination),
+                Err(create_error) => match sftp.lstat(Path::new(&destination)) {
+                    Ok(stat) if stat.is_dir() => Ok(destination),
+                    Ok(_) => Err(format!(
+                        "Upload destination is not a directory: {destination}"
+                    )),
+                    Err(_) => Err(create_error.to_string()),
+                },
+            }
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+fn terminal_upload_name(name: &str, number: usize) -> String {
+    if number == 0 {
+        name.to_owned()
+    } else if let Some((stem, extension)) = name.rsplit_once('.') {
+        if stem.is_empty() {
+            format!("{name}-{number}")
+        } else {
+            format!("{stem}-{number}.{extension}")
+        }
+    } else {
+        format!("{name}-{number}")
+    }
+}
+
+fn upload_terminal_item(
+    sftp: &Sftp,
+    local: &Path,
+    remote: &str,
+    cancel: &AtomicBool,
+    report: &impl Fn(Event),
+) -> Result<String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Transfer cancelled.".into());
+    }
+    let meta = fs::symlink_metadata(local).map_err(|error| error.to_string())?;
+    if meta.is_symlink() {
+        return Err(format!(
+            "Symbolic links are not uploaded: {}",
+            local.display()
+        ));
+    }
+    if !meta.is_file() && !meta.is_dir() {
+        return Err("Only regular files and folders can be uploaded.".into());
+    }
+    let name = local
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Unsupported local filename")?;
+    for number in 0..1000 {
+        let candidate = terminal_upload_name(name, number);
+        let destination = join_remote(remote, &candidate)?;
+        if meta.is_dir() {
+            match sftp.mkdir(Path::new(&destination), 0o700) {
+                Ok(()) => {
+                    let result = fs::read_dir(local)
+                        .map_err(|error| error.to_string())?
+                        .try_for_each(|entry| {
+                            upload(
+                                sftp,
+                                &entry.map_err(|error| error.to_string())?.path(),
+                                &destination,
+                                1,
+                                cancel,
+                                report,
+                            )
+                        });
+                    return result.map(|()| destination.clone()).map_err(|error| {
+                        format!("{error} A partial folder may remain at {destination}.")
+                    });
+                }
+                Err(create_error) => match sftp.lstat(Path::new(&destination)) {
+                    Ok(_) => continue,
+                    Err(error) if error.code() == ssh2::ErrorCode::SFTP(2) => {
+                        return Err(create_error.to_string());
+                    }
+                    Err(error) => return Err(error.to_string()),
+                },
+            }
+        } else {
+            match upload_as(sftp, local, remote, 0, Some(&candidate), cancel, report) {
+                Ok(()) => return Ok(destination),
+                Err(upload_error) => match sftp.lstat(Path::new(&destination)) {
+                    Ok(_) => continue,
+                    Err(error) if error.code() == ssh2::ErrorCode::SFTP(2) => {
+                        return Err(upload_error);
+                    }
+                    Err(error) => return Err(error.to_string()),
+                },
+            }
+        }
+    }
+    Err(format!("No available name for {name} in {remote}"))
+}
 pub fn join_remote(parent: &str, name: &str) -> Result<String> {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
         return Err("Unsupported file name.".into());
@@ -630,6 +793,17 @@ fn upload(
     cancel: &AtomicBool,
     report: &impl Fn(Event),
 ) -> Result<()> {
+    upload_as(sftp, local, remote, depth, None, cancel, report)
+}
+fn upload_as(
+    sftp: &Sftp,
+    local: &Path,
+    remote: &str,
+    depth: usize,
+    remote_name: Option<&str>,
+    cancel: &AtomicBool,
+    report: &impl Fn(Event),
+) -> Result<()> {
     if cancel.load(Ordering::Relaxed) {
         return Err("Transfer cancelled.".into());
     }
@@ -643,10 +817,13 @@ fn upload(
             local.display()
         ));
     }
-    let name = local
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or("Unsupported local filename")?;
+    let name = match remote_name {
+        Some(name) => name,
+        None => local
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("Unsupported local filename")?,
+    };
     let destination = join_remote(remote, name)?;
     if meta.is_dir() {
         match sftp.lstat(Path::new(&destination)) {
@@ -892,6 +1069,14 @@ mod tests {
             assert!(join_remote("/upload", name).is_err());
         }
     }
+
+    #[test]
+    fn terminal_upload_names_preserve_extensions_without_replacing_files() {
+        assert_eq!(terminal_upload_name("photo.png", 0), "photo.png");
+        assert_eq!(terminal_upload_name("photo.png", 1), "photo-1.png");
+        assert_eq!(terminal_upload_name("archive", 2), "archive-2");
+        assert_eq!(terminal_upload_name(".env", 3), ".env-3");
+    }
     #[test]
     fn streams_binary_data_and_cancels_before_write() {
         let data = vec![0xAB; 200_000];
@@ -982,6 +1167,35 @@ mod tests {
             "listing can succeed after an earlier failure"
         );
         let local = tempfile::tempdir().unwrap();
+        let terminal_source = local.path().join("terminal image.png");
+        fs::write(&terminal_source, b"terminal upload").unwrap();
+        let terminal_destination =
+            terminal_upload_directory(&sftp, remote.path().to_str().unwrap()).unwrap();
+        let first_terminal_upload = upload_terminal_item(
+            &sftp,
+            &terminal_source,
+            &terminal_destination,
+            &AtomicBool::new(false),
+            &|_| {},
+        )
+        .unwrap();
+        let second_terminal_upload = upload_terminal_item(
+            &sftp,
+            &terminal_source,
+            &terminal_destination,
+            &AtomicBool::new(false),
+            &|_| {},
+        )
+        .unwrap();
+        assert_ne!(first_terminal_upload, second_terminal_upload);
+        assert!(first_terminal_upload.ends_with("/terminal image.png"));
+        assert!(second_terminal_upload.ends_with("/terminal image-1.png"));
+        let mut uploaded = Vec::new();
+        sftp.open(Path::new(&second_terminal_upload))
+            .unwrap()
+            .read_to_end(&mut uploaded)
+            .unwrap();
+        assert_eq!(uploaded, b"terminal upload");
         let preview_path = remote.path().join("reconnect-preview.txt");
         fs::write(&preview_path, b"preview survives reconnect").unwrap();
         let receive = || {
